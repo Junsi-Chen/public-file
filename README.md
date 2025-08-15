@@ -4,7 +4,7 @@
 # 新增：针对 SSE 接口的配置（重点修改部分）
         location /api/ai/portal/chat/petAssistantStreamConversation {
         # 代理到后端服务（和根路径一致，保持后端地址统一）
-        proxy_pass http://172.29.102.251:10999;
+        proxy_pass http://172.44.122.251:10919;
         proxy_http_version 1.1;
 
         # SSE 核心参数（禁用缓冲和缓存，保持长连接）
