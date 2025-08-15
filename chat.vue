@@ -24,13 +24,19 @@
       enable-back-to-top
       scroll-y
       :scroll-top="scrollTop"
+      :scroll-into-view="scrollIntoView"
       :style="{ height: `calc(100vh - ${navHeight}px - 100px)` }"
       @scroll="handleScroll"
+      @touchstart="handleTouchStart"
+      @touchmove="handleTouchMove"
+      @touchend="handleTouchEnd"
     >
       <view style="padding-right: 24rpx">
         <view v-for="(item, index) in messageList" :key="index">
           <aiChatItem :item="item" />
         </view>
+        <!-- 添加底部锚点 -->
+        <view id="bottom-anchor" style="height: 1px"></view>
       </view>
     </scroll-view>
 
@@ -40,6 +46,12 @@
       :userInput="assistantQuestion.message"
       @handleSend="handleInputSend"
     />
+    <!-- 回到底部  -->
+    <wd-transition :show="showScrollBottom" name="fade">
+      <view class="scroll-bottom" @click="scrollToBottom">
+        <wd-icon name="arrow-down" size="22px" color="#333"></wd-icon>
+      </view>
+    </wd-transition>
   </view>
 </template>
 
@@ -132,10 +144,16 @@ const handleCreate = async () => {
   await handleRequestTalkByType();
 };
 // ================================== 信息相关 ======================================
+const isAnswering = ref(false);
 const handleInputSend = async (messageObj: {
   message: string;
   imageList: Array<string>;
 }) => {
+  // 正在回答中
+  if (isAnswering.value) {
+    Tips.toast("小灵正在回答中~", 2500);
+    return;
+  }
   // 赋值问题
   assistantQuestion.value.message = messageObj.message;
   // 只有一张图片
@@ -186,6 +204,8 @@ const handleRequestSendAndGetStreamByType = async (messageObj) => {
   assistantQuestion.value.message = "";
   // 成功
   if (resQuestion.succeed) {
+    // 回答状态
+    isAnswering.value = true;
     // 拿到questionId
     assistantQuestion.value.questionId = resQuestion.data.id;
     // 新增助手消息项
@@ -198,13 +218,13 @@ const handleRequestSendAndGetStreamByType = async (messageObj) => {
       status: "created",
     });
     // push 到数组
-    nextTick(async () => {
-      messageList.value.push(assistantMessage);
-      await scrollToBottom();
-    });
-    // 再滚动一下
-    await scrollToBottom();
-    // 3. 获取流式
+    messageList.value.push(assistantMessage);
+    setTimeout(() => {
+      nextTick(() => {
+        scrollToBottom();
+      });
+    }, 300);
+    // 3. 获取流式 -> 这里拿到streamPost 是可以停止请求的，但是UI没做，先留着
     const streamPost = getStream(
       {
         message: messageObj.message,
@@ -213,9 +233,9 @@ const handleRequestSendAndGetStreamByType = async (messageObj) => {
         userId: assistantQuestion.value.userId,
         type: type.value,
       },
-      (chunk) => {
+      async (chunk) => {
         // 在这里 chunk 流式返回的数据， chunk.data.content 是内容
-        handleChunk(chunk, assistantMessage);
+        await handleChunk(chunk, assistantMessage);
       }
     );
   } else {
@@ -228,7 +248,7 @@ const handleRequestSendAndGetStreamByType = async (messageObj) => {
 const handleChunk = (chunk: any, assistantMessage: any) => {
   console.log("chunk", chunk);
   assistantMessage.status = chunk.status;
-  
+
   // 错误处理
   if (chunk.status == "error") {
     const newContent = chunk.data.content;
@@ -238,69 +258,86 @@ const handleChunk = (chunk: any, assistantMessage: any) => {
     });
     return;
   }
-  
+
   // 正常情况 - 流式数据
   if (chunk.status == "answering" && chunk.data?.content) {
     const newContent = chunk.data.content;
-    
+
     // 初始化：如果还没有缓存，创建缓存
     if (!assistantMessage._buffer) {
       assistantMessage._buffer = assistantMessage.content || ""; // 保留已有内容
       assistantMessage._targetLength = assistantMessage._buffer.length;
       assistantMessage._currentLength = assistantMessage._buffer.length;
     }
-    
+
     // 追加新内容到缓存
     assistantMessage._buffer += newContent;
     assistantMessage._targetLength = assistantMessage._buffer.length;
-    
+
     // 开始打字（如果还没开始）
     if (!assistantMessage._typingActive) {
       assistantMessage._typingActive = true;
       typeWriter(assistantMessage);
     }
   }
+
+  // 结束
+  if (chunk.status == "done") {
+    isAnswering.value = false;
+  }
 };
 
 // 修正的打字机函数
 const typeWriter = (assistantMessage: any) => {
   const typingSpeed = 50; // 打字速度（毫秒）
-  
   const typeNext = () => {
     if (assistantMessage._currentLength < assistantMessage._targetLength) {
       // 每次增加1-2个字符
-      const increment = Math.min(2, assistantMessage._targetLength - assistantMessage._currentLength);
+      const increment = Math.min(
+        2,
+        assistantMessage._targetLength - assistantMessage._currentLength
+      );
       assistantMessage._currentLength += increment;
-      
+
       // 更新显示内容（截取到当前长度）
-      assistantMessage.content = assistantMessage._buffer.substring(0, assistantMessage._currentLength);
-      
+      assistantMessage.content = assistantMessage._buffer.substring(
+        0,
+        assistantMessage._currentLength
+      );
+
       nextTick(() => {
-        scrollToBottom();
+        if (autoScrollEnabled.value && !isUserTouching.value) {
+          scrollToBottom();
+        }
       });
-      
+
       // 继续打字
       setTimeout(typeNext, typingSpeed);
     } else {
       // 打字完成
       assistantMessage._typingActive = false;
-      
+
       // 确保内容以换行符结尾
-      if (assistantMessage.content && !assistantMessage.content.endsWith('\n')) {
-        assistantMessage.content += '\n <br/>';
+      if (
+        assistantMessage.content &&
+        !assistantMessage.content.endsWith("\n")
+      ) {
+        assistantMessage.content += "\n <br/>";
       }
-      
+
       // 如果是最后一条消息，标记为完成
       if (assistantMessage.status == "answering") {
         assistantMessage.status = "done";
       }
-      
+
       nextTick(() => {
-        scrollToBottom();
+        if (autoScrollEnabled.value && !isUserTouching.value) {
+          scrollToBottom();
+        }
       });
     }
   };
-  
+
   typeNext();
 };
 
@@ -312,11 +349,9 @@ const resetMessageState = (assistantMessage: any) => {
   delete assistantMessage._typingActive;
 };
 
-
-
-
 // 错误消息处理
 const handleErrorMessage = () => {
+  isAnswering.value = false;
   // 错误
   const assistantMessage = reactive({
     time: "",
@@ -327,10 +362,13 @@ const handleErrorMessage = () => {
     status: "error",
   });
   // push 到数组
-  nextTick(async () => {
-    messageList.value.push(assistantMessage);
-    await scrollToBottom();
-  });
+
+  messageList.value.push(assistantMessage);
+  setTimeout(() => {
+    nextTick(() => {
+      scrollToBottom();
+    });
+  }, 300);
 };
 
 // ================================ 处理历史记录 ==================================
@@ -425,23 +463,115 @@ const navHeight = ref(0);
 const getNavHeight = (height: number) => {
   navHeight.value = height;
 };
-const handleScroll = (e) => {
-  // console.log(e);
-};
-// 滚动到最底部的方法
+
+// 添加scrollIntoView响应式变量
+const scrollIntoView = ref("");
+// 修改滚动到最底部的方法
 const scrollToBottom = () => {
   nextTick(() => {
-    const query = uni.createSelectorQuery();
-    query
+    scrollIntoView.value = "bottom-anchor";
+    // 滚动到底部时重置状态
+    hasScrolledUp.value = false;
+    showScrollBottom.value = false;
+    // 重新启用自动滚动
+    autoScrollEnabled.value = true;
+    setTimeout(() => {
+      scrollIntoView.value = "";
+    }, 300);
+  });
+};
+
+// 控制回到底部按钮的显示/隐藏
+const showScrollBottom = ref(false);
+
+// 添加变量记录滚动基准位置
+const lastScrollTop = ref(0);
+const hasScrolledUp = ref(false);
+
+// 控制是否自动滚动到底部
+const autoScrollEnabled = ref(true);
+
+const handleScroll = (e) => {
+  const currentScrollTop = e.detail.scrollTop;
+  const scrollHeight = e.detail.scrollHeight;
+
+  uni
+    .createSelectorQuery()
+    .select("#messageScroll")
+    .boundingClientRect((rect) => {
+      if (rect) {
+        const containerHeight = (rect as any).height;
+        const maxScrollTop = scrollHeight - containerHeight;
+        const distanceFromBottom = maxScrollTop - currentScrollTop;
+        // 检测用户滚动行为
+        if (currentScrollTop < lastScrollTop.value - 10) {
+          // 用户向上滚动
+          hasScrolledUp.value = true;
+          autoScrollEnabled.value = false;
+        } else if (currentScrollTop > lastScrollTop.value + 10) {
+          // 用户向下滚动，检查是否接近底部
+          if (distanceFromBottom < 20) {
+            // 距离底部20px内
+            hasScrolledUp.value = false;
+            autoScrollEnabled.value = true;
+          }
+        }
+
+        lastScrollTop.value = currentScrollTop;
+        showScrollBottom.value = hasScrolledUp.value;
+      }
+    })
+    .exec();
+};
+
+// 添加触摸相关变量和函数
+const isUserTouching = ref(false);
+const touchStartY = ref(0);
+const handleTouchStart = (e) => {
+  // 用户开始触摸，立即停止自动滚动
+  autoScrollEnabled.value = false;
+  isUserTouching.value = true;
+  touchStartY.value = e.touches[0].clientY;
+};
+
+const handleTouchMove = (e) => {
+  // 用户正在滑动，确保自动滚动保持关闭
+  if (isUserTouching.value) {
+    autoScrollEnabled.value = false;
+  }
+};
+
+const handleTouchEnd = (e) => {
+  // 用户触摸结束
+  isUserTouching.value = false;
+  // 检查用户是否滚动到了底部，如果是则重新启用自动滚动
+  setTimeout(() => {
+    uni
+      .createSelectorQuery()
       .select("#messageScroll")
-      .scrollOffset((res: any) => {
-        if (res) {
-          // res.scrollHeight 即为滚动内容的总高度
-          scrollTop.value = res.scrollHeight + 50;
+      .boundingClientRect((rect) => {
+        if (rect) {
+          const query = uni.createSelectorQuery();
+          query
+            .select("#messageScroll")
+            .scrollOffset((scrollRes) => {
+              if (scrollRes) {
+                const containerHeight = (rect as any).height;
+                const scrollHeight = (scrollRes as any).scrollHeight;
+                const currentScrollTop = (scrollRes as any).scrollTop;
+                const maxScrollTop = scrollHeight - containerHeight;
+                const distanceFromBottom = maxScrollTop - currentScrollTop;
+                if (distanceFromBottom < 20) {
+                  // 用户滚动到了底部，重新启用自动滚动
+                  autoScrollEnabled.value = true;
+                }
+              }
+            })
+            .exec();
         }
       })
       .exec();
-  });
+  }, 100);
 };
 </script>
 
@@ -457,5 +587,23 @@ const scrollToBottom = () => {
   -webkit-appearance: none;
   background: transparent;
   color: transparent;
+}
+
+.chat {
+  position: relative;
+}
+.scroll-bottom {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: absolute;
+  bottom: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  padding: 12rpx;
+  border-radius: 50%;
+  background-color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 </style>
